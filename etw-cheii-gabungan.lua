@@ -18,6 +18,8 @@
     BAGIAN 1 (ETW)   = verbatim + 3 pengaman kecil bertanda "[GABUNGAN]".
     BAGIAN 2 (cheII) = verbatim, dengan whitelist bawaan cheII
                        DIHAPUS karena sudah digantikan whitelist di atas.
+    BAGIAN 3 (Dragon Hub) = DRAGON HUB - Anti-Void, menempel ke panel cheII
+                       (GUI sendiri; tidak menyentuh GUI/tombol cheII).
 
     Pengaman:
       1. ETW hanya menghapus GUI emote miliknya sendiri (atribut ETW_Owned).
@@ -4391,6 +4393,591 @@ __c()
         warn("[GABUNGAN] BAGIAN 2 (cheII Emotes) error, BAGIAN 1 tetap jalan: " .. tostring(errCheII))
     end
 end
+-- ============================================================
+--  BAGIAN 3  |  DRAGON HUB - Anti-Void
+--  Ditempel ke panel cheII, tanpa mengubah script cheII:
+--    * GUI sendiri dengan nama unik  -> tidak menghapus/menimpa GUI cheII
+--    * DisplayOrder 998              -> selalu di bawah cheII (999)
+--    * tombol bulat LENGKET ke tombol panel cheII (ToggleSettings)
+--    * klik tombol                        = minimize / expand hub
+--    * tombol pin di title bar            = lengketkan lagi ke panel
+--    * seluruh bagian dibungkus pcall     -> error di sini tidak mematikan ETW/cheII
+-- ============================================================
+do
+    local okBagian3, errBagian3 = pcall(function()
+        local Players = game:GetService("Players")
+        local RunService = game:GetService("RunService")
+        local TweenService = game:GetService("TweenService")
+        local UserInputService = game:GetService("UserInputService")
+
+        local player = Players.LocalPlayer
+        if not player then return end
+
+        local playerGui = player:FindFirstChildOfClass("PlayerGui")
+        if not playerGui then
+            playerGui = player:WaitForChild("PlayerGui", 10)
+        end
+        if not playerGui then return end
+
+        local HUB_NAME = "DragonHub_AntiVoid"
+        local BALL_SIZE = 60
+        local HUB_W, HUB_H = 280, 200
+        local BALL_COLOR = Color3.fromRGB(255, 100, 0)
+        local GUI_COLOR = Color3.fromRGB(25, 25, 35)
+
+        -- Hapus hanya GUI milik bagian ini (kalau script dijalankan ulang).
+        local existing = playerGui:FindFirstChild(HUB_NAME)
+        if existing then existing:Destroy() end
+
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Name = HUB_NAME
+        screenGui.ResetOnSpawn = false
+        screenGui.IgnoreGuiInset = true
+        screenGui.DisplayOrder = 998
+        screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        screenGui.Parent = playerGui
+        screenGui:SetAttribute("DragonHub_Owned", true)
+
+        -- ---------- tombol bulat (lengket ke panel cheII) ----------
+        local floatingBall = Instance.new("TextButton")
+        floatingBall.Name = "FloatingBall"
+        floatingBall.Size = UDim2.fromOffset(BALL_SIZE, BALL_SIZE)
+        floatingBall.Position = UDim2.fromOffset(12, 300)
+        floatingBall.BackgroundColor3 = BALL_COLOR
+        floatingBall.BorderSizePixel = 0
+        floatingBall.AnchorPoint = Vector2.new(0, 0)
+        floatingBall.Text = "🚀"
+        floatingBall.TextColor3 = Color3.fromRGB(255, 255, 255)
+        floatingBall.TextSize = 20
+        floatingBall.Font = Enum.Font.GothamBold
+        floatingBall.ZIndex = 10
+        floatingBall.Parent = screenGui
+
+        local ballCorner = Instance.new("UICorner")
+        ballCorner.CornerRadius = UDim.new(1, 0)
+        ballCorner.Parent = floatingBall
+
+        -- ---------- hub utama ----------
+        local mainFrame = Instance.new("Frame")
+        mainFrame.Name = "MainHub"
+        mainFrame.Size = UDim2.fromOffset(HUB_W, HUB_H)
+        mainFrame.Position = UDim2.fromOffset(12, 90)
+        mainFrame.BackgroundColor3 = GUI_COLOR
+        mainFrame.BorderSizePixel = 0
+        mainFrame.ClipsDescendants = true
+        mainFrame.Visible = false
+        mainFrame.ZIndex = 11
+        mainFrame.Parent = screenGui
+
+        local hubCorner = Instance.new("UICorner")
+        hubCorner.CornerRadius = UDim.new(0, 12)
+        hubCorner.Parent = mainFrame
+
+        local titleBar = Instance.new("TextButton")
+        titleBar.Name = "TitleBar"
+        titleBar.Size = UDim2.new(1, 0, 0, 35)
+        titleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+        titleBar.BorderSizePixel = 0
+        titleBar.Text = ""
+        titleBar.ZIndex = 12
+        titleBar.Parent = mainFrame
+
+        local titleLabel = Instance.new("TextLabel")
+        titleLabel.Name = "Title"
+        titleLabel.Size = UDim2.new(1, -105, 1, 0)
+        titleLabel.Position = UDim2.new(0, 10, 0, 0)
+        titleLabel.BackgroundTransparency = 1
+        titleLabel.Text = "DRAGON HUB"
+        titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+        titleLabel.Font = Enum.Font.GothamBold
+        titleLabel.TextSize = 14
+        titleLabel.ZIndex = 13
+        titleLabel.Parent = titleBar
+
+        local pinBtn = Instance.new("TextButton")
+        pinBtn.Name = "PinBtn"
+        pinBtn.Size = UDim2.new(0, 35, 0, 35)
+        pinBtn.Position = UDim2.new(1, -70, 0, 0)
+        pinBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+        pinBtn.BorderSizePixel = 0
+        pinBtn.Text = "📌"
+        pinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        pinBtn.Font = Enum.Font.GothamBold
+        pinBtn.TextSize = 14
+        pinBtn.ZIndex = 13
+        pinBtn.Parent = titleBar
+
+        local pinCorner = Instance.new("UICorner")
+        pinCorner.CornerRadius = UDim.new(0, 8)
+        pinCorner.Parent = pinBtn
+
+        local closeBtn = Instance.new("TextButton")
+        closeBtn.Name = "CloseBtn"
+        closeBtn.Size = UDim2.new(0, 35, 0, 35)
+        closeBtn.Position = UDim2.new(1, -35, 0, 0)
+        closeBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+        closeBtn.BorderSizePixel = 0
+        closeBtn.Text = "X"
+        closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        closeBtn.Font = Enum.Font.GothamBold
+        closeBtn.TextSize = 16
+        closeBtn.ZIndex = 13
+        closeBtn.Parent = titleBar
+
+        local closeCorner = Instance.new("UICorner")
+        closeCorner.CornerRadius = UDim.new(0, 8)
+        closeCorner.Parent = closeBtn
+
+        local contentFrame = Instance.new("Frame")
+        contentFrame.Name = "ContentFrame"
+        contentFrame.Size = UDim2.new(1, -20, 1, -45)
+        contentFrame.Position = UDim2.new(0, 10, 0, 40)
+        contentFrame.BackgroundTransparency = 1
+        contentFrame.BorderSizePixel = 0
+        contentFrame.ZIndex = 12
+        contentFrame.Parent = mainFrame
+
+        -- ---------- anti-void ----------
+        local antiVoidEnabled = false
+        local antiVoidPart = nil
+        local antiVoidY = -100
+
+        local antiVoidBtn = Instance.new("TextButton")
+        antiVoidBtn.Name = "AntiVoidBtn"
+        antiVoidBtn.Size = UDim2.new(1, 0, 0, 40)
+        antiVoidBtn.Position = UDim2.new(0, 0, 0, 0)
+        antiVoidBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+        antiVoidBtn.BorderSizePixel = 0
+        antiVoidBtn.Text = "🛡️ ANTI-VOID: ❌ OFF"
+        antiVoidBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        antiVoidBtn.Font = Enum.Font.GothamBold
+        antiVoidBtn.TextSize = 14
+        antiVoidBtn.ZIndex = 13
+        antiVoidBtn.Parent = contentFrame
+
+        local antiVoidCorner = Instance.new("UICorner")
+        antiVoidCorner.CornerRadius = UDim.new(0, 8)
+        antiVoidCorner.Parent = antiVoidBtn
+
+        local adjustBtn = Instance.new("TextButton")
+        adjustBtn.Name = "AdjustBtn"
+        adjustBtn.Size = UDim2.new(1, 0, 0, 40)
+        adjustBtn.Position = UDim2.new(0, 0, 0, 50)
+        adjustBtn.BackgroundColor3 = Color3.fromRGB(255, 100, 0)
+        adjustBtn.BorderSizePixel = 0
+        adjustBtn.Text = "📐 ESCOLHER POSIÇÃO"
+        adjustBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        adjustBtn.Font = Enum.Font.GothamBold
+        adjustBtn.TextSize = 14
+        adjustBtn.ZIndex = 13
+        adjustBtn.Parent = contentFrame
+
+        local adjustCorner = Instance.new("UICorner")
+        adjustCorner.CornerRadius = UDim.new(0, 8)
+        adjustCorner.Parent = adjustBtn
+
+        local positionLabel = Instance.new("TextLabel")
+        positionLabel.Name = "PositionLabel"
+        positionLabel.Size = UDim2.new(1, 0, 0, 25)
+        positionLabel.Position = UDim2.new(0, 0, 0, 100)
+        positionLabel.BackgroundTransparency = 1
+        positionLabel.Text = "Posição Y: " .. antiVoidY
+        positionLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+        positionLabel.Font = Enum.Font.Gotham
+        positionLabel.TextSize = 12
+        positionLabel.TextXAlignment = Enum.TextXAlignment.Center
+        positionLabel.ZIndex = 13
+        positionLabel.Parent = contentFrame
+
+        -- ---------- panel pengaturan posisi ----------
+        local adjustmentGui = Instance.new("Frame")
+        adjustmentGui.Name = "AntiVoidAdjustment"
+        adjustmentGui.Size = UDim2.fromOffset(200, 180)
+        adjustmentGui.Position = UDim2.new(0.5, -100, 0.5, -90)
+        adjustmentGui.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        adjustmentGui.BorderSizePixel = 0
+        adjustmentGui.Visible = false
+        adjustmentGui.ZIndex = 20
+        adjustmentGui.Parent = screenGui
+
+        local adjustmentCorner = Instance.new("UICorner")
+        adjustmentCorner.CornerRadius = UDim.new(0, 12)
+        adjustmentCorner.Parent = adjustmentGui
+
+        local adjustTitle = Instance.new("TextLabel")
+        adjustTitle.Size = UDim2.new(1, 0, 0, 30)
+        adjustTitle.BackgroundTransparency = 1
+        adjustTitle.Text = "AJUSTAR POSIÇÃO"
+        adjustTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+        adjustTitle.Font = Enum.Font.GothamBold
+        adjustTitle.TextSize = 16
+        adjustTitle.ZIndex = 21
+        adjustTitle.Parent = adjustmentGui
+
+        local adjustPositionLabel = Instance.new("TextLabel")
+        adjustPositionLabel.Size = UDim2.new(1, 0, 0, 25)
+        adjustPositionLabel.Position = UDim2.new(0, 0, 0, 30)
+        adjustPositionLabel.BackgroundTransparency = 1
+        adjustPositionLabel.Text = "Y: " .. antiVoidY
+        adjustPositionLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        adjustPositionLabel.Font = Enum.Font.GothamBold
+        adjustPositionLabel.TextSize = 14
+        adjustPositionLabel.ZIndex = 21
+        adjustPositionLabel.Parent = adjustmentGui
+
+        local upBtn = Instance.new("TextButton")
+        upBtn.Size = UDim2.fromOffset(80, 60)
+        upBtn.Position = UDim2.new(0.5, -40, 0, 60)
+        upBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 255)
+        upBtn.BorderSizePixel = 0
+        upBtn.Text = "⬆️\nSUBIR"
+        upBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        upBtn.Font = Enum.Font.GothamBold
+        upBtn.TextSize = 12
+        upBtn.TextWrapped = true
+        upBtn.ZIndex = 21
+        upBtn.Parent = adjustmentGui
+
+        local upCorner = Instance.new("UICorner")
+        upCorner.CornerRadius = UDim.new(0, 8)
+        upCorner.Parent = upBtn
+
+        local downBtn = Instance.new("TextButton")
+        downBtn.Size = UDim2.fromOffset(80, 60)
+        downBtn.Position = UDim2.new(0.5, -40, 0, 130)
+        downBtn.BackgroundColor3 = Color3.fromRGB(255, 150, 0)
+        downBtn.BorderSizePixel = 0
+        downBtn.Text = "⬇️\nDESCER"
+        downBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        downBtn.Font = Enum.Font.GothamBold
+        downBtn.TextSize = 12
+        downBtn.TextWrapped = true
+        downBtn.ZIndex = 21
+        downBtn.Parent = adjustmentGui
+
+        local downCorner = Instance.new("UICorner")
+        downCorner.CornerRadius = UDim.new(0, 8)
+        downCorner.Parent = downBtn
+
+        local readyBtn = Instance.new("TextButton")
+        readyBtn.Size = UDim2.fromOffset(120, 35)
+        readyBtn.Position = UDim2.new(0.5, -60, 1, -45)
+        readyBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+        readyBtn.BorderSizePixel = 0
+        readyBtn.Text = "✅ PRONTO"
+        readyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        readyBtn.Font = Enum.Font.GothamBold
+        readyBtn.TextSize = 14
+        readyBtn.ZIndex = 21
+        readyBtn.Parent = adjustmentGui
+
+        local readyCorner = Instance.new("UICorner")
+        readyCorner.CornerRadius = UDim.new(0, 8)
+        readyCorner.Parent = readyBtn
+
+        -- ---------- fungsi anti-void ----------
+        local adjusting = false
+        local adjustConnection = nil
+
+        local function updateAntiVoid()
+            if antiVoidPart then
+                antiVoidPart:Destroy()
+                antiVoidPart = nil
+            end
+
+            if antiVoidEnabled then
+                antiVoidPart = Instance.new("Part")
+                antiVoidPart.Name = "AntiVoidFloor"
+                antiVoidPart.Size = Vector3.new(10000, 2, 10000)
+                antiVoidPart.Position = Vector3.new(0, antiVoidY, 0)
+                antiVoidPart.Anchored = true
+                antiVoidPart.CanCollide = true
+                antiVoidPart.Transparency = 0.7
+                antiVoidPart.BrickColor = BrickColor.new("Bright green")
+                antiVoidPart.Material = Enum.Material.Neon
+                antiVoidPart:SetAttribute("DragonHub_Owned", true)
+                antiVoidPart.Parent = workspace
+            end
+
+            positionLabel.Text = "Posição Y: " .. tostring(math.floor(antiVoidY))
+            adjustPositionLabel.Text = "Y: " .. tostring(math.floor(antiVoidY))
+        end
+
+        local function startAdjusting(direction)
+            adjusting = true
+            local speed = 5
+            if adjustConnection then
+                adjustConnection:Disconnect()
+                adjustConnection = nil
+            end
+            adjustConnection = RunService.Heartbeat:Connect(function()
+                if adjusting then
+                    antiVoidY = antiVoidY + (direction * speed)
+                    updateAntiVoid()
+                else
+                    adjustConnection:Disconnect()
+                    adjustConnection = nil
+                end
+            end)
+        end
+
+        local function stopAdjusting()
+            adjusting = false
+            if adjustConnection then
+                adjustConnection:Disconnect()
+                adjustConnection = nil
+            end
+        end
+
+        antiVoidBtn.MouseButton1Click:Connect(function()
+            antiVoidEnabled = not antiVoidEnabled
+            if antiVoidEnabled then
+                antiVoidBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
+                antiVoidBtn.Text = "🛡️ ANTI-VOID: ✅ ON"
+            else
+                antiVoidBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+                antiVoidBtn.Text = "🛡️ ANTI-VOID: ❌ OFF"
+            end
+            updateAntiVoid()
+        end)
+
+        adjustBtn.MouseButton1Click:Connect(function()
+            adjustmentGui.Visible = true
+            mainFrame.Visible = false
+        end)
+
+        upBtn.MouseButton1Down:Connect(function() startAdjusting(1) end)
+        upBtn.MouseButton1Up:Connect(function() stopAdjusting() end)
+        upBtn.MouseLeave:Connect(function() stopAdjusting() end)
+
+        downBtn.MouseButton1Down:Connect(function() startAdjusting(-1) end)
+        downBtn.MouseButton1Up:Connect(function() stopAdjusting() end)
+        downBtn.MouseLeave:Connect(function() stopAdjusting() end)
+
+        readyBtn.MouseButton1Click:Connect(function()
+            adjustmentGui.Visible = false
+            mainFrame.Visible = true
+            stopAdjusting()
+        end)
+
+        -- ---------- lengket ke panel cheII (hanya membaca posisi tombolnya) ----------
+        local docked = true
+
+        local function viewportSize()
+            local cam = workspace.CurrentCamera
+            if cam then return cam.ViewportSize end
+            return Vector2.new(1280, 720)
+        end
+
+        local function uiRoots()
+            local roots = { playerGui }
+            local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
+            if okCore and coreGui then
+                local robloxGui = coreGui:FindFirstChild("RobloxGui")
+                if robloxGui then table.insert(roots, robloxGui) end
+                table.insert(roots, coreGui)
+            end
+            return roots
+        end
+
+        local function findCheIIToggle()
+            for _, root in ipairs(uiRoots()) do
+                local cheGui = root:FindFirstChild("cheII-Settings")
+                if cheGui and cheGui:IsA("ScreenGui") then
+                    local btn = cheGui:FindFirstChild("ToggleSettings", true)
+                    if btn and btn:IsA("GuiObject") and btn.AbsoluteSize.X > 0 then
+                        return btn
+                    end
+                end
+            end
+            return nil
+        end
+
+        local function dockPosition()
+            local viewport = viewportSize()
+            local x, y
+            local btn = findCheIIToggle()
+            if btn and btn.Visible then
+                local absPos, absSize = btn.AbsolutePosition, btn.AbsoluteSize
+                if absSize.X > 0 and absSize.Y > 0 then
+                    x = absPos.X + absSize.X + 8
+                    y = absPos.Y + (absSize.Y - BALL_SIZE) / 2
+                end
+            end
+            if not x or not y then
+                x = 12
+                y = viewport.Y - BALL_SIZE - 62
+            end
+            x = math.clamp(x, 6, math.max(6, viewport.X - BALL_SIZE - 6))
+            y = math.clamp(y, 6, math.max(6, viewport.Y - BALL_SIZE - 6))
+            return UDim2.fromOffset(x, y)
+        end
+
+        local function hubTargetPosition()
+            local viewport = viewportSize()
+            local ballPos = floatingBall.AbsolutePosition
+            local ballSize = floatingBall.AbsoluteSize
+            local x = ballPos.X
+            local y = ballPos.Y - HUB_H - 10
+            if y < 6 then
+                y = ballPos.Y + ballSize.Y + 10
+            end
+            x = math.clamp(x, 6, math.max(6, viewport.X - HUB_W - 6))
+            y = math.clamp(y, 6, math.max(6, viewport.Y - HUB_H - 6))
+            return UDim2.fromOffset(x, y)
+        end
+
+        local function setHubOpen(isOpen)
+            if isOpen then
+                mainFrame.Position = hubTargetPosition()
+            end
+            mainFrame.Visible = isOpen
+            floatingBall.Text = isOpen and "🔒" or "🚀"
+        end
+
+        -- ikuti posisi tombol panel cheII selama mode lengket
+        local ballDragging = false
+        RunService.RenderStepped:Connect(function()
+            if docked and not ballDragging then
+                floatingBall.Position = dockPosition()
+            end
+        end)
+
+        -- ---------- drag tombol bulat + klik = minimize/expand ----------
+        local dragInput, dragStart, ballStart
+        local moved = 0
+
+        floatingBall.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+                ballDragging = true
+                moved = 0
+                dragStart = input.Position
+                ballStart = floatingBall.Position
+            end
+        end)
+
+        floatingBall.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement then
+                dragInput = input
+            end
+        end)
+
+        floatingBall.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+                ballDragging = false
+                dragInput = nil
+                if moved <= 6 then
+                    setHubOpen(not mainFrame.Visible)
+                end
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(input)
+            if ballDragging and input == dragInput and dragStart then
+                local delta = input.Position - dragStart
+                moved = math.max(moved, math.abs(delta.X) + math.abs(delta.Y))
+                if moved > 6 then
+                    docked = false
+                end
+                floatingBall.Position = UDim2.new(
+                    ballStart.X.Scale,
+                    ballStart.X.Offset + delta.X,
+                    ballStart.Y.Scale,
+                    ballStart.Y.Offset + delta.Y
+                )
+            end
+        end)
+
+        -- ---------- drag hub lewat title bar ----------
+        local hubDragging = false
+        local hubDragStart, hubStart
+
+        titleBar.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+                hubDragging = true
+                hubDragStart = input.Position
+                hubStart = mainFrame.Position
+            end
+        end)
+
+        titleBar.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+                hubDragging = false
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(input)
+            if hubDragging and hubDragStart then
+                if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement then
+                    local delta = input.Position - hubDragStart
+                    mainFrame.Position = UDim2.new(
+                        hubStart.X.Scale,
+                        hubStart.X.Offset + delta.X,
+                        hubStart.Y.Scale,
+                        hubStart.Y.Offset + delta.Y
+                    )
+                end
+            end
+        end)
+
+        -- ---------- tombol pin & close ----------
+        pinBtn.MouseButton1Click:Connect(function()
+            docked = true
+            floatingBall.Position = dockPosition()
+        end)
+
+        closeBtn.MouseButton1Click:Connect(function()
+            setHubOpen(false)
+            stopAdjusting()
+        end)
+
+        -- ---------- animasi mengambang (hanya saat tidak lengket) ----------
+        local taskSpawn = (task and task.spawn) or spawn
+        local taskWait = (task and task.wait) or wait
+
+        taskSpawn(function()
+            while screenGui.Parent do
+                if docked then
+                    taskWait(0.3)
+                else
+                    local goal = { Position = floatingBall.Position + UDim2.fromOffset(0, -5) }
+                    local tween = TweenService:Create(
+                        floatingBall,
+                        TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
+                        goal
+                    )
+                    tween:Play()
+                    taskWait(1.2)
+
+                    goal = { Position = floatingBall.Position + UDim2.fromOffset(0, 5) }
+                    tween = TweenService:Create(
+                        floatingBall,
+                        TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
+                        goal
+                    )
+                    tween:Play()
+                    taskWait(1.2)
+                end
+            end
+        end)
+
+        -- posisi awal: langsung lengket ke panel cheII
+        floatingBall.Position = dockPosition()
+        updateAntiVoid()
+
+        pcall(function()
+            warn("[GABUNGAN] BAGIAN 3 (Dragon Hub) aktif, lengket ke panel cheII.")
+        end)
+    end)
+
+    if not okBagian3 then
+        pcall(function()
+            warn("[GABUNGAN] BAGIAN 3 (Dragon Hub) error, ETW & cheII tetap jalan: " .. tostring(errBagian3))
+        end)
+    end
+end
+
 -- ============================================================
 --  AKHIR GABUNGAN
 -- ============================================================
