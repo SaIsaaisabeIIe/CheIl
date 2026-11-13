@@ -1,0 +1,969 @@
+--==================================================
+-- ETW AUTO FARM - PANEL MINIMAL
+-- Hanya panel Auto Farm dan tombol OFF.
+-- Auto Farm mulai otomatis 10 detik setelah script dijalankan.
+--
+-- [ID] Tambahan di versi ini (fitur lain tidak diubah):
+-- 1. Anti AFK / anti kick memakai LocalPlayer.Idled + VirtualUser,
+--    sama seperti script referensi (防踢).
+-- 2. RequestTeleport("Mega") dipanggil 5 detik setelah Auto Farm berjalan,
+--    dan sisa waktunya (remaining) tampil di label panel + overlay Auto Farm.
+-- 3. Saat Auto Farm aktif: zoom kamera maksimum 1000 (minimum 0.5) dan
+--    animasi grab tanah (rbxassetid://16493266847) dihentikan.
+--==================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Events = ReplicatedStorage:WaitForChild("Events", 10)
+
+local TeleportEvent = Events and Events:WaitForChild("RequestTeleport", 10)
+local RewardEvent = Events and Events:WaitForChild("RewardEvent", 10)
+local SpinEvent = Events and Events:WaitForChild("SpinEvent", 10)
+local TimedRewards = LocalPlayer:WaitForChild("TimedRewards", 10)
+
+local TICKET_TIMER = 5580 -- 1 jam 33 menit
+local INITIAL_DELAY = 10
+local MEGA_TELEPORT_DELAY = 5 -- [ID] jarak Auto Farm berjalan -> RequestTeleport("Mega")
+
+-- ===================== [ID] ANTI AFK / ANTI KICK =====================
+-- Sama seperti script referensi (防踢): saat Roblox menganggap player idle
+-- (~20 menit tanpa input), kontrol diambil ulang dan satu klik virtual dikirim
+-- supaya server tidak menganggap kita AFK lalu meng-kick.
+do
+    LocalPlayer.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+        task.wait(2)
+    end)
+end
+
+local function safeFire(container, remoteName, ...)
+    if not container then
+        warn("[ETW] Container remote tidak tersedia: " .. tostring(remoteName))
+        return false
+    end
+    local remote = container:FindFirstChild(remoteName)
+    if not remote then
+        warn("[ETW] Remote tidak ditemukan: " .. tostring(remoteName))
+        return false
+    end
+    local ok, err = pcall(function(...)
+        remote:FireServer(...)
+    end, ...)
+    if not ok then
+        warn("[ETW] Remote gagal dipanggil: " .. tostring(err))
+        return false
+    end
+    return true
+end
+
+-- Pengaturan minimum yang masih dipakai oleh kode Auto Farm.
+local config = { autofarm = false }
+local autofarm = false
+local farmMoving = false
+local showMap = false
+local function autoSaveConfig() end
+
+-- ===================== [ID] JADWAL TELEPORT MEGA =====================
+-- Mega tidak lagi dikirim bersamaan dengan Normal. Mega dikirim
+-- MEGA_TELEPORT_DELAY detik setelah Auto Farm berjalan, dan sisa waktunya
+-- (remaining) ditampilkan di label panel serta overlay Auto Farm.
+local ticketTimerLabel -- [ID] dibuat di bawah; dipakai juga oleh Auto Farm
+local megaCountdown = nil -- nil = tidak ada hitung mundur, angka = sisa detik
+local megaTeleportSent = false
+local megaTeleportStatus = "WAITING" -- WAITING / SENT / ERROR / DONE
+
+local function fireTeleportOnce(kind)
+    if not TeleportEvent then
+        warn("[CHEII] RequestTeleport tidak ditemukan; teleport " .. tostring(kind) .. " dilewati.")
+        return false, "TELEPORT REMOTE MISSING"
+    end
+    local ok, err = pcall(function()
+        TeleportEvent:FireServer(kind)
+    end)
+    if not ok then
+        return false, err
+    end
+    return true
+end
+
+local function startMegaTeleportCountdown()
+    if megaTeleportSent then
+        return
+    end
+    task.spawn(function()
+        for remaining = MEGA_TELEPORT_DELAY, 1, -1 do
+            megaCountdown = remaining
+            if ticketTimerLabel then
+                ticketTimerLabel.Text = "MEGA: " .. remaining .. "s"
+            end
+            task.wait(1)
+        end
+
+        megaCountdown = 0
+        local ok, err = fireTeleportOnce("Mega")
+        megaCountdown = nil
+
+        if ok then
+            megaTeleportSent = true
+            megaTeleportStatus = "SENT"
+            if ticketTimerLabel then
+                ticketTimerLabel.Text = "MEGA: SENT"
+            end
+            -- Status SENT hanya sebentar, setelah itu kembali ke TICKET biasa.
+            task.delay(5, function()
+                if megaTeleportStatus == "SENT" then
+                    megaTeleportStatus = "DONE"
+                end
+            end)
+        else
+            megaTeleportStatus = "ERROR"
+            if ticketTimerLabel then
+                ticketTimerLabel.Text = "MEGA: ERROR"
+            end
+            warn("[CHEII] Teleport Mega:", err)
+        end
+    end)
+end
+
+-- ===================== [ID] UI LIBRARY LOKAL (kit panel) =====================
+local UI = {}
+UI.__index = UI
+-- 创建主窗口
+function UI:NewWindow(title)
+    local self = setmetatable({}, UI)
+    -- 主容器
+    self.MainGui = Instance.new("ScreenGui")
+    self.MainGui.Name = "ChiChiWorldUI"
+    self.MainGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    self.MainGui.ResetOnSpawn = false
+    self.MainGui.Parent = syn and CoreGui or PlayerGui
+    -- 主窗口框架
+    self.Window = Instance.new("Frame")
+    self.Window.Name = "MainWindow"
+    self.Window.Size = UDim2.new(0, 150, 0, 150)
+    self.Window.Position = UDim2.new(0.1, 0, 0.1, 0)
+    self.Window.BackgroundTransparency = 1
+    self.Window.BorderSizePixel = 0
+    self.Window.ClipsDescendants = true
+    self.Window.Parent = self.MainGui
+    -- 窗口圆角
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = self.Window
+    -- 标题栏
+    self.TitleBar = Instance.new("Frame")
+    self.TitleBar.Name = "TitleBar"
+    self.TitleBar.Size = UDim2.new(1, 0, 0, 40)
+    self.TitleBar.BackgroundColor3 = Color3.fromRGB(36, 36, 42)
+    self.TitleBar.Parent = self.Window
+    -- 标题文字
+    self.TitleText = Instance.new("TextLabel")
+    self.TitleText.Name = "TitleText"
+    self.TitleText.Size = UDim2.new(1, -40, 1, 0)
+    self.TitleText.Position = UDim2.new(0, 10, 0, 0)
+    self.TitleText.BackgroundTransparency = 1
+    self.TitleText.Text = title
+    self.TitleText.Font = Enum.Font.SourceSansBold
+    self.TitleText.TextSize = 18
+    self.TitleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    self.TitleText.TextXAlignment = Enum.TextXAlignment.Left
+    self.TitleText.Parent = self.TitleBar
+    -- 收起按钮
+    self.CollapseBtn = Instance.new("TextButton")
+    self.CollapseBtn.Name = "CollapseBtn"
+    self.CollapseBtn.Size = UDim2.new(0, 40, 1, 0)
+    self.CollapseBtn.Position = UDim2.new(1, -40, 0, 0)
+    self.CollapseBtn.BackgroundTransparency = 1
+    self.CollapseBtn.Text = "-"
+    self.CollapseBtn.Font = Enum.Font.SourceSansBold
+    self.CollapseBtn.TextSize = 20
+    self.CollapseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    self.CollapseBtn.Parent = self.TitleBar
+    -- 内容容器
+    self.ContentContainer = Instance.new("Frame")
+    self.ContentContainer.Name = "ContentContainer"
+    self.ContentContainer.Size = UDim2.new(1, 0, 1, -40)
+    self.ContentContainer.Position = UDim2.new(0, 0, 0, 40)
+    self.ContentContainer.BackgroundTransparency = 1
+    self.ContentContainer.ClipsDescendants = false
+    self.ContentContainer.Parent = self.Window
+    -- 菜单容器
+    self.MenuContainer = Instance.new("Frame")
+    self.MenuContainer.Size = UDim2.new(1, 0, 1, 0)
+    self.MenuContainer.BackgroundTransparency = 1
+    self.MenuContainer.ClipsDescendants = false
+    self.MenuContainer.Parent = self.ContentContainer
+    -- 窗口拖拽功能
+    self:MakeDraggable()
+    -- 收起/展开功能
+    self.IsCollapsed = false
+    self.CollapseBtn.MouseButton1Click:Connect(function()
+        self:ToggleCollapse()
+    end)
+    -- 存储所有子菜单
+    self.Sections = {}
+    self.CurrentY = 0
+    return self
+end
+-- 窗口拖拽
+function UI:MakeDraggable()
+    local dragging = false
+    local dragStart = Vector2.new()
+    local startPos = UDim2.new()
+    self.TitleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = self.Window.Position
+            UserInputService.MouseIconEnabled = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            self.Window.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+            UserInputService.MouseIconEnabled = true
+        end
+    end)
+end
+-- 收起/展开窗口
+function UI:ToggleCollapse()
+    self.IsCollapsed = not self.IsCollapsed
+    if self.IsCollapsed then
+        -- 收起
+        -- 同步收起所有展开的子菜单
+        for _, section in ipairs(self.Sections) do
+            if section.IsExpanded then
+                section.IsExpanded = false
+                section.ToggleBtn.Text = "+"
+                TweenService:Create(section.Content, TweenInfo.new(0.2), {
+                    Size = UDim2.new(1, 0, 0, 0)
+                }):Play()
+                -- 更新主容器高度
+                self.CurrentY = self.CurrentY - section.ContentY
+            end
+        end
+        TweenService:Create(self.Window, TweenInfo.new(0.2), {
+            Size = UDim2.new(0, 150, 0, 40)
+        }):Play()
+        self.CollapseBtn.Text = "+"
+        self.ContentContainer.Visible = false
+    else
+        -- 展开
+        -- 重新计算CurrentY和所有子菜单的位置
+        self.CurrentY = 0
+        local currentOffset = 0
+        for _, section in ipairs(self.Sections) do
+            -- 设置子菜单的位置
+            section.Frame.Position = UDim2.new(0, 0, 0, currentOffset)
+            section.Content.Position = UDim2.new(0, 0, 0, currentOffset + 50)
+            -- 更新当前偏移量和CurrentY
+            currentOffset = currentOffset + 50
+            self.CurrentY = self.CurrentY + 50
+        end
+        -- 计算正确的窗口高度，与子菜单展开/收起时的逻辑一致
+        local newHeight = math.max(150, 40 + self.CurrentY + 20) -- 40 是标题栏高度，20 是底部边距
+        TweenService:Create(self.Window, TweenInfo.new(0.2), {
+            Size = UDim2.new(0, 150, 0, newHeight)
+        }):Play()
+        self.CollapseBtn.Text = "-"
+        -- 确保MenuContainer大小正确
+        self.MenuContainer.Size = UDim2.new(1, 0, 1, 0)
+        -- 恢复ContentContainer的相对大小
+        self.ContentContainer.Size = UDim2.new(1, 0, 1, -40)
+        -- 确保所有子菜单都可见
+        for _, section in ipairs(self.Sections) do
+            section.Frame.Visible = true
+            section.Content.Visible = true
+        end
+        task.wait(0.2)
+        self.ContentContainer.Visible = true
+    end
+end
+-- 创建子菜单
+function UI:NewSection(title)
+    local section = {}
+    section.Title = title
+    section.Frame = Instance.new("Frame")
+    section.Frame.Size = UDim2.new(1, 0, 0, 50)
+    section.Frame.Position = UDim2.new(0, 0, 0, self.CurrentY)
+    section.Frame.BackgroundColor3 = Color3.fromRGB(36, 36, 42)
+    section.Frame.Parent = self.MenuContainer
+    -- 子菜单圆角
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = section.Frame
+    -- 子菜单标题
+    section.TitleText = Instance.new("TextLabel")
+    section.TitleText.Size = UDim2.new(1, -40, 1, 0)
+    section.TitleText.Position = UDim2.new(0, 10, 0, 0)
+    section.TitleText.BackgroundTransparency = 1
+    section.TitleText.Text = title
+    section.TitleText.Font = Enum.Font.SourceSansBold
+    section.TitleText.TextSize = 16
+    section.TitleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    section.TitleText.TextXAlignment = Enum.TextXAlignment.Left
+    section.TitleText.Parent = section.Frame
+    -- 展开/收起按钮
+    section.ToggleBtn = Instance.new("TextButton")
+    section.ToggleBtn.Size = UDim2.new(0, 40, 1, 0)
+    section.ToggleBtn.Position = UDim2.new(1, -40, 0, 0)
+    section.ToggleBtn.BackgroundTransparency = 1
+    section.ToggleBtn.Text = "+"
+    section.ToggleBtn.Font = Enum.Font.SourceSansBold
+    section.ToggleBtn.TextSize = 18
+    section.ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    section.ToggleBtn.Parent = section.Frame
+    -- 功能按钮容器
+    section.Content = Instance.new("Frame")
+    section.Content.Size = UDim2.new(1, 0, 0, 0)
+    section.Content.Position = UDim2.new(0, 0, 0, self.CurrentY + 50)
+    section.Content.BackgroundTransparency = 1
+    section.Content.ClipsDescendants = true
+    section.Content.Parent = self.MenuContainer
+    -- 状态
+    section.IsExpanded = false
+    section.Buttons = {}
+    section.ContentY = 0
+    -- 更新菜单容器高度
+    self.CurrentY = self.CurrentY + 50
+    self.MenuContainer.Size = UDim2.new(1, 0, 0, self.CurrentY)
+    -- 确保子菜单可见
+    section.Frame.Visible = true
+    section.Content.Visible = true
+    -- 更新主窗口高度以跟随子菜单大小
+    local newHeight = math.max(150, 40 + self.CurrentY + 20) -- 40 是标题栏高度，20 是底部边距
+    TweenService:Create(self.Window, TweenInfo.new(0.2), {
+        Size = UDim2.new(0, 150, 0, newHeight)
+    }):Play()
+    -- 更新内容容器大小
+    self.ContentContainer.Size = UDim2.new(1, 0, 1, -40)
+    -- 子菜单展开/收起
+    section.ToggleBtn.MouseButton1Click:Connect(function()
+        section.IsExpanded = not section.IsExpanded
+        if section.IsExpanded then
+            -- 展开
+            section.ToggleBtn.Text = "-"
+            TweenService:Create(section.Content, TweenInfo.new(0.2), {
+                Size = UDim2.new(1, 0, 0, section.ContentY)
+            }):Play()
+            -- 更新主容器高度
+            self.CurrentY = self.CurrentY + section.ContentY
+        else
+            -- 收起
+            section.ToggleBtn.Text = "+"
+            TweenService:Create(section.Content, TweenInfo.new(0.2), {
+                Size = UDim2.new(1, 0, 0, 0)
+            }):Play()
+            -- 更新主容器高度
+            self.CurrentY = self.CurrentY - section.ContentY
+        end
+        -- 重新计算所有子菜单的位置
+        local currentOffset = 0
+        for i, sec in ipairs(self.Sections) do
+            -- 设置子菜单的位置
+            sec.Frame.Position = UDim2.new(0, 0, 0, currentOffset)
+            sec.Content.Position = UDim2.new(0, 0, 0, currentOffset + 50)
+            -- 更新当前偏移量
+            currentOffset = currentOffset + 50
+            if sec.IsExpanded then
+                currentOffset = currentOffset + sec.ContentY
+            end
+        end
+        -- 保持MenuContainer大小不变，确保所有子菜单都能显示
+        self.MenuContainer.Size = UDim2.new(1, 0, 1, 0)
+        -- 更新主窗口高度以跟随子菜单大小
+        local newHeight = math.max(150, 40 + self.CurrentY + 20) -- 40 是标题栏高度，20 是底部边距
+        TweenService:Create(self.Window, TweenInfo.new(0.2), {
+            Size = UDim2.new(0, 150, 0, newHeight)
+        }):Play()
+        -- 确保内容容器大小正确
+        self.ContentContainer.Size = UDim2.new(1, 0, 1, -40)
+        -- 确保所有子菜单都可见
+        for _, sec in ipairs(self.Sections) do
+            sec.Frame.Visible = true
+            sec.Content.Visible = true
+        end
+    end)
+    -- 创建开关按钮
+    function section:CreateToggle(text, callback)
+        -- 计算按钮位置
+        local isEven = #section.Buttons % 2 == 0
+        local btnSize = UDim2.new(0.50, 0, 0, 35)
+        local btnPosition
+        if isEven then
+            btnPosition = UDim2.new(0.50, 0, 0, section.ContentY)
+        else
+            btnPosition = UDim2.new(0, 0, 0, section.ContentY)
+        end
+        local btn = Instance.new("TextButton")
+        btn.Name = "ToggleBtn_" .. text
+        btn.Size = btnSize
+        btn.Position = btnPosition
+        btn.BackgroundColor3 = Color3.fromRGB(44, 44, 50)
+        btn.BackgroundTransparency = 0
+        btn.Parent = section.Content
+        -- 按钮圆角
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 4)
+        corner.Parent = btn
+        -- 按钮文字
+        local btnText = Instance.new("TextLabel")
+        btnText.Size = UDim2.new(1, 0, 1, 0)
+        btnText.Position = UDim2.new(0, 0, 0, 0)
+        btnText.BackgroundTransparency = 1
+        btnText.Text = text
+        btnText.Font = Enum.Font.SourceSans
+        btnText.TextSize = 18
+        btnText.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btnText.TextXAlignment = Enum.TextXAlignment.Center
+        btnText.Parent = btn
+        -- 开关状态
+        local toggleState = false
+        -- 按钮点击事件
+        btn.MouseButton1Click:Connect(function()
+            toggleState = not toggleState
+            btn.BackgroundColor3 = toggleState and Color3.fromRGB(60, 180, 60) or Color3.fromRGB(44, 44, 50)
+            callback(toggleState)
+        end)
+        -- 按钮悬停效果
+        btn.MouseEnter:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.1), {
+                BackgroundColor3 = toggleState and Color3.fromRGB(70, 190, 70) or Color3.fromRGB(54, 54, 60)
+            }):Play()
+        end)
+        btn.MouseLeave:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.1), {
+                BackgroundColor3 = toggleState and Color3.fromRGB(60, 180, 60) or Color3.fromRGB(44, 44, 50)
+            }):Play()
+        end)
+        -- 更新容器高度
+        if not isEven then
+            section.ContentY = section.ContentY + 35
+        end
+        table.insert(section.Buttons, btn)
+        return btn
+    end
+    -- 创建普通按钮
+    function section:CreateButton(text, callback)
+        -- 计算按钮位置
+        local isEven = #section.Buttons % 2 == 0
+        local btnSize = UDim2.new(0.50, 0, 0, 35)
+        local btnPosition
+        if isEven then
+            btnPosition = UDim2.new(0.50, 0, 0, section.ContentY)
+        else
+            btnPosition = UDim2.new(0, 0, 0, section.ContentY)
+        end
+        local btn = Instance.new("TextButton")
+        btn.Name = "Button_" .. text
+        btn.Size = btnSize
+        btn.Position = btnPosition
+        btn.BackgroundColor3 = Color3.fromRGB(44, 44, 50)
+        btn.BackgroundTransparency = 0
+        btn.Text = ""
+        btn.Parent = section.Content
+        -- 按钮圆角
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 4)
+        corner.Parent = btn
+        -- 按钮文字
+        local btnText = Instance.new("TextLabel")
+        btnText.Size = UDim2.new(1, 0, 1, 0)
+        btnText.Position = UDim2.new(0, 0, 0, 0)
+        btnText.BackgroundTransparency = 1
+        btnText.Text = text
+        btnText.Font = Enum.Font.SourceSans
+        btnText.TextSize = 18
+        btnText.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btnText.TextXAlignment = Enum.TextXAlignment.Center
+        btnText.Parent = btn
+        -- 按钮点击事件
+        btn.MouseButton1Click:Connect(function()
+            callback()
+        end)
+        -- 按钮悬停效果
+        btn.MouseEnter:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.1), {
+                BackgroundColor3 = Color3.fromRGB(54, 54, 60)
+            }):Play()
+        end)
+        btn.MouseLeave:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.1), {
+                BackgroundColor3 = Color3.fromRGB(44, 44, 50)
+            }):Play()
+        end)
+        -- 更新容器高度
+        if not isEven then
+            section.ContentY = section.ContentY + 35
+        end
+        table.insert(section.Buttons, btn)
+        return btn
+    end
+    table.insert(self.Sections, section)
+    return section
+end
+
+-- ===================== [ID] TAMBAHAN SAAT AUTO FARM AKTIF =====================
+-- Baru dijalankan setelah Auto Farm aktif, bukan saat script dimuat.
+local GRAB_ANIMATION_ID = "rbxassetid://16493266847"
+local farmExtrasEnabled = false
+
+local function setupGrabAnimationSkip(character)
+    local humanoid = character:WaitForChild("Humanoid")
+    local animator = humanoid:WaitForChild("Animator")
+
+    animator.AnimationPlayed:Connect(function(track)
+        if track.Animation and track.Animation.AnimationId == GRAB_ANIMATION_ID then
+            task.defer(function()
+                track:Stop(0)
+            end)
+        end
+    end)
+end
+
+local function enableFarmExtras()
+    if farmExtrasEnabled then
+        return
+    end
+    farmExtrasEnabled = true
+
+    -- Zoom maksimum
+    LocalPlayer.CameraMaxZoomDistance = 1000
+    LocalPlayer.CameraMinZoomDistance = 0.5
+
+    if LocalPlayer.Character then
+        task.spawn(setupGrabAnimationSkip, LocalPlayer.Character)
+    end
+    LocalPlayer.CharacterAdded:Connect(setupGrabAnimationSkip)
+end
+
+local autoFarmRunning = false
+local function startAutoFarm()
+    if autoFarmRunning then return end
+    autoFarmRunning = true
+    local enabled = true
+    autofarm = enabled
+    config.autofarm = enabled
+    autoSaveConfig()
+    -- [ID] RequestTeleport("Mega") dijadwalkan MEGA_TELEPORT_DELAY detik
+    -- setelah Auto Farm benar-benar berjalan.
+    startMegaTeleportCountdown()
+    -- [ID] Zoom maksimum + hapus animasi grab, hanya setelah Auto Farm aktif.
+    enableFarmExtras()
+    coroutine.wrap(function()
+        local text = Drawing.new("Text")
+        text.Outline = true
+        text.OutlineColor = Color3.new(0, 0, 0)
+        text.Color = Color3.new(1, 1, 1)
+        text.Center = false
+        text.Position = Vector2.new(64, 64)
+        text.Text = ""
+        text.Size = 14
+        text.Visible = true
+        local startTime = tick()
+        local eatTime = 0
+        local lastEatTime = tick()
+        local timer = 0
+        local grabTimer = 0
+        local sellDebounce = false
+        local sellCount = 0
+        local bedrock = Instance.new("Part")
+        bedrock.Anchored = true
+        bedrock.Size = Vector3.new(2048, 10, 2048)
+        bedrock.Position = Vector3.new(0, -5, 0)
+        bedrock.BrickColor = BrickColor.Black()
+        bedrock.Parent = workspace
+        local map, chunks = workspace:FindFirstChild("Map"), workspace:FindFirstChild("Chunks")
+        if map and chunks then
+            map.Parent, chunks.Parent = nil, nil
+        end
+        local numChunks = 0
+        local hum,
+            root,
+            size,
+            events,
+            eat,
+            grab,
+            sell,
+            sendTrack,
+            chunk,
+            radius,
+            autoConn,
+            sizeConn
+        local function onCharAdd(char)
+            numChunks = 0
+            hum = char:WaitForChild("Humanoid")
+            root = char:WaitForChild("HumanoidRootPart")
+            -- [ID] Object khas game diberi batas waktu 10 detik supaya tidak
+            -- menggantung selamanya kalau developer mengganti namanya.
+            size = char:WaitForChild("Size", 10)
+            events = char:WaitForChild("Events", 10)
+            if not events then
+                warn("[ETW] Autofarm dinonaktifkan: remote 'Events' tidak ada di "
+                    .. "karakter (kemungkinan nama remote berubah setelah update game).")
+                return
+            end
+            eat = events:WaitForChild("Eat", 10)
+            grab = events:WaitForChild("Grab", 10)
+            sell = events:WaitForChild("Sell", 10)
+            chunk = char:WaitForChild("CurrentChunk", 10)
+            sendTrack = char:WaitForChild("SendTrack", 10)
+            radius = char:WaitForChild("Radius", 10)
+            if not (size and eat and grab and sell and chunk and sendTrack and radius) then
+                warn("[ETW] Autofarm dinonaktifkan: object game tidak lengkap "
+                    .. "(Size/CurrentChunk/SendTrack/Radius atau Eat/Grab/Sell).")
+                return
+            end
+            autoConn = game["Run Service"].Heartbeat:Connect(function(dt)
+                if not autofarm then
+                    autoConn:Disconnect()
+                    return
+                end
+                local ran = tick() - startTime
+                local hours = math.floor(ran / 60 / 60)
+                local minutes = math.floor(ran / 60)
+                local seconds = math.floor(ran)
+                local eatMinutes = math.floor(eatTime / 60)
+                local eatSeconds = math.floor(eatTime)
+                local y = bedrock.Position.Y + bedrock.Size.Y / 2 + hum.HipHeight + root.Size.Y / 2
+                local sizeAdd = LocalPlayer.Upgrades.Multiplier.Value / 100
+                local addAmount = LocalPlayer.Upgrades.MaxSize.Value / sizeAdd
+                local sellTime = addAmount / 2
+                local sellMinutes = math.floor(sellTime / 60)
+                local sellSeconds = math.floor(sellTime)
+                local secondEarn = math.floor(((LocalPlayer.Upgrades.MaxSize.Value + 0.5) ^ 2 - 0.25) / 2 * 100 / sellTime)
+                local minuteEarn = secondEarn * 60
+                local hourEarn = minuteEarn * 60
+                local dayEarn = hourEarn * 24
+                -- [ID] Sisa waktu sebelum RequestTeleport("Mega") dikirim.
+                local megaLine = ""
+                if megaCountdown and megaCountdown > 0 then
+                    megaLine = "\nMega Teleport: " .. megaCountdown .. "s"
+                elseif megaTeleportStatus == "SENT" then
+                    megaLine = "\nMega Teleport: SENT"
+                end
+                text.Text = ""
+                    .. "\nRun Time: " .. string.format("%ih%im%is", hours, minutes % 60, seconds % 60)
+                    .. "\nActual Time: " .. string.format("%im%is", eatMinutes % 60, eatSeconds % 60)
+                    .. "\nEstimated Time: " .. string.format("%im%is", sellMinutes % 60, sellSeconds % 60)
+                    .. "\nDaily Income: " .. dayEarn
+                    .. "\nBlock Count: " .. numChunks
+                    .. megaLine
+                hum:ChangeState(Enum.HumanoidStateType.Physics)
+                grab:FireServer()
+                root.Anchored = false
+                eat:FireServer()
+                sendTrack:FireServer()
+                if chunk.Value then
+                    if timer > 0 then
+                        numChunks += 1
+                    end
+                    timer = 0
+                    grabTimer += dt
+                else
+                    timer += dt
+                    grabTimer = 0
+                end
+                if timer > 60 then
+                    hum.Health = 0
+                    timer = 0
+                    numChunks = 0
+                end
+                if grabTimer > 15 then
+                    size.Value = LocalPlayer.Upgrades.MaxSize.Value
+                end
+                if (size.Value >= LocalPlayer.Upgrades.MaxSize.Value)
+                    or timer > 8
+                then
+                    if timer < 8 then
+                        sell:FireServer()
+                        if not sellDebounce then
+                            local args = {
+                                {
+                                    MapTime = -1,
+                                    Paused = true
+                                }
+                            }
+                            safeFire(Events, "SetServerSettings", unpack(args))
+                        end
+                        sellDebounce = true
+                    else
+                        local args = {
+                            {
+                                MapTime = -1,
+                                Paused = true
+                            }
+                        }
+                        safeFire(Events, "SetServerSettings", unpack(args))
+                    end
+                    numChunks = 0
+                elseif size.Value == 0 then
+                    if sellDebounce then
+                        local currentEatTime = tick()
+                        eatTime = currentEatTime - lastEatTime
+                        lastEatTime = currentEatTime
+                        sellCount += 1
+                    end
+                    sellDebounce = false
+                end
+                if farmMoving then
+                    local bound = 300
+                    local startPos = CFrame.new(-bound/2, y, -bound/2)
+                    local r = radius.Value * 1.1
+                    local dist = (r * numChunks)
+                    local x = dist % bound
+                    local z = math.floor(dist / bound) * r
+                    local offset = CFrame.new(x, 0, z + r * 2)
+                    if z > bound then
+                        local args = {
+                            {
+                                MapTime = -1,
+                                Paused = true
+                            }
+                        }
+                        safeFire(Events, "SetServerSettings", unpack(args))
+                        numChunks = 0
+                    end
+                    root.CFrame = startPos * offset
+                else
+                    root.CFrame = CFrame.new(0, y, 0)
+                end
+            end)
+            hum.Died:Connect(function()
+                autoConn:Disconnect()
+                local args = {
+                    {
+                        MapTime = -1,
+                        Paused = true
+                    }
+                }
+                safeFire(Events, "SetServerSettings", unpack(args))
+            end)
+            -- [ID] FindFirstChild + pesan, bukan WaitForChild tanpa batas waktu.
+            local etwManager = char:FindFirstChild("LocalChunkManager")
+            if etwManager then
+                etwManager.Enabled = false
+            else
+                warn("[ETW] 'LocalChunkManager' tidak ditemukan, bagian ini dilewati.")
+            end
+            local etwAnimate = char:FindFirstChild("Animate")
+            if etwAnimate then
+                etwAnimate.Enabled = false
+            end
+        end
+        if LocalPlayer.Character then
+            task.spawn(onCharAdd, LocalPlayer.Character)
+        else
+            task.spawn(onCharAdd, LocalPlayer.CharacterAdded:Wait())
+        end
+        local charAddConn = LocalPlayer.CharacterAdded:Connect(onCharAdd)
+        while autofarm do
+            local dt = task.wait()
+            if workspace:FindFirstChild("Loading") then
+                workspace.Loading:Destroy()
+            end
+            if map and chunks then
+                if showMap then
+                    map.Parent, chunks.Parent = workspace, workspace
+                else
+                    map.Parent, chunks.Parent = nil, nil
+                end
+            end
+        end
+        charAddConn:Disconnect()
+        if autoConn then
+            autoConn:Disconnect()
+        end
+        if map and chunks then
+            map.Parent, chunks.Parent = workspace, workspace
+        end
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+        bedrock:Destroy()
+        local etwRestoreChar = LocalPlayer.Character
+        local etwRestoreManager = etwRestoreChar and etwRestoreChar:FindFirstChild("LocalChunkManager")
+        if etwRestoreManager then
+            etwRestoreManager.Enabled = true
+        end
+        local etwRestoreAnimate = etwRestoreChar and etwRestoreChar:FindFirstChild("Animate")
+        if etwRestoreAnimate then
+            etwRestoreAnimate.Enabled = true
+        end
+        text:Destroy()
+        autoFarmRunning = false
+    end)()
+end
+
+local mainUI = UI:NewWindow("CHEII AUTO FARM")
+local autoSection = mainUI:NewSection("Auto Farm")
+local autoFarmCancelled = false
+
+-- Label countdown berada di panel yang sama, bukan panel tambahan.
+mainUI.Window.Size = UDim2.new(0, 150, 0, 175)
+ticketTimerLabel = Instance.new("TextLabel")
+ticketTimerLabel.Name = "TicketCountdown"
+ticketTimerLabel.Size = UDim2.new(1, -12, 0, 22)
+ticketTimerLabel.Position = UDim2.new(0, 6, 0, 125)
+ticketTimerLabel.BackgroundTransparency = 1
+ticketTimerLabel.Text = "TICKET: 01:33:00"
+ticketTimerLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+ticketTimerLabel.TextSize = 12
+ticketTimerLabel.Font = Enum.Font.GothamBold
+ticketTimerLabel.Parent = mainUI.Window
+
+local function formatTicketTime(seconds)
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor((seconds % 3600) / 60)
+    local secs = seconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, secs)
+end
+
+local function claimSmallRewardsOnce()
+    if not RewardEvent then
+        warn("[CHEII] RewardEvent tidak ditemukan; Small Reward dilewati.")
+        return
+    end
+    if not TimedRewards then
+        warn("[CHEII] TimedRewards tidak ditemukan; reward dilewati.")
+        return
+    end
+
+    -- SmallReward, lalu GetChildren() index 2 sampai 9.
+    local smallReward = TimedRewards:FindFirstChild("SmallReward")
+    if smallReward then
+        local ok, err = pcall(function()
+            RewardEvent:FireServer(smallReward)
+        end)
+        if not ok then warn("[CHEII] SmallReward gagal:", err) end
+    else
+        warn("[CHEII] SmallReward tidak ditemukan.")
+    end
+
+    local children = TimedRewards:GetChildren()
+    for index = 2, 9 do
+        local reward = children[index]
+        if reward then
+            local ok, err = pcall(function()
+                RewardEvent:FireServer(reward)
+            end)
+            if not ok then warn("[CHEII] Reward index " .. index .. " gagal:", err) end
+        else
+            warn("[CHEII] TimedRewards:GetChildren()[" .. index .. "] tidak ada.")
+        end
+    end
+end
+
+local function spinOnce()
+    if not SpinEvent then
+        warn("[CHEII] SpinEvent tidak ditemukan; Spin dilewati.")
+        return
+    end
+    local ok, err = pcall(function()
+        SpinEvent:FireServer()
+    end)
+    if not ok then warn("[CHEII] SpinEvent gagal:", err) end
+end
+
+local function fireTeleportNormalOnce()
+    if not TeleportEvent then
+        warn("[CHEII] RequestTeleport tidak ditemukan; teleport dilewati.")
+        ticketTimerLabel.Text = "TELEPORT REMOTE MISSING"
+        return
+    end
+
+    -- Normal dipanggil tepat satu kali saat sisa waktu 00:00 (seperti sebelumnya).
+    local normalOk, normalErr = fireTeleportOnce("Normal")
+    if normalOk then
+        ticketTimerLabel.Text = "TELEPORT SENT"
+    else
+        warn("[CHEII] Teleport Normal:", normalErr)
+        ticketTimerLabel.Text = "TELEPORT ERROR"
+    end
+
+    -- [ID] Mega sudah dijadwalkan 5 detik setelah Auto Farm berjalan. Kalau
+    -- Auto Farm tidak pernah jalan (OFF ditekan sebelum 10 detik), Mega
+    -- dikirim di sini supaya fitur teleport Mega tidak hilang.
+    if not megaTeleportSent then
+        local megaOk, megaErr = fireTeleportOnce("Mega")
+        if megaOk then
+            megaTeleportSent = true
+            megaTeleportStatus = "SENT"
+        else
+            warn("[CHEII] Teleport Mega:", megaErr)
+        end
+    end
+end
+
+autoSection:CreateButton("OFF", function()
+    -- OFF hanya mematikan Auto Farm. Countdown dan jadwal reward/spin/teleport
+    -- tetap berjalan.
+    autoFarmCancelled = true
+    autofarm = false
+    config.autofarm = false
+    autoSaveConfig()
+end)
+
+-- Countdown berulang setiap 01:33:00.
+-- Auto Farm hanya dicoba sekali, 10 detik setelah script dijalankan.
+task.spawn(function()
+    local elapsedTotal = 0
+    local autoFarmStartAttempted = false
+
+    while true do
+        for remaining = TICKET_TIMER, 0, -1 do
+            -- [ID] Selama hitung mundur Mega berjalan, label dipegang oleh
+            -- startMegaTeleportCountdown supaya teksnya tidak saling menimpa.
+            if not megaCountdown then
+                ticketTimerLabel.Text = "TICKET: " .. formatTicketTime(remaining)
+            end
+
+            if not autoFarmStartAttempted
+                and elapsedTotal == INITIAL_DELAY
+                and not autoFarmCancelled then
+                autoFarmStartAttempted = true
+                startAutoFarm()
+            end
+
+            if remaining == 10 then
+                ticketTimerLabel.Text = "TICKET: REWARDS"
+                claimSmallRewardsOnce()
+            elseif remaining == 8 then
+                ticketTimerLabel.Text = "TICKET: SPIN"
+                spinOnce()
+            elseif remaining == 0 then
+                ticketTimerLabel.Text = "TICKET: TELEPORT"
+                fireTeleportNormalOnce()
+            end
+
+            if remaining > 0 then
+                task.wait(1)
+                elapsedTotal += 1
+            end
+        end
+
+        -- Siklus tiket baru dimulai setelah teleport pada 00:00.
+        task.wait(1)
+        elapsedTotal += 1
+    end
+end)
